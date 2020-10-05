@@ -123,7 +123,7 @@ namespace AgGateway.ADAPT.ISOv4Plugin.Mappers
             //Connections
             if (workItem.EquipmentConfigurationGroup != null)
             {
-                task.Connections = _connectionMapper.ExportConnections(workItem.Id.ReferenceId, workItem.EquipmentConfigurationGroup.EquipmentConfigurations).ToList();
+                task.Connections = _connectionMapper.ExportConnections(task, workItem.EquipmentConfigurationGroup.EquipmentConfigurations).ToList();
             }
 
             //Status
@@ -569,20 +569,11 @@ namespace AgGateway.ADAPT.ISOv4Plugin.Mappers
         internal static RxRate ImportRate(int productId, double productRate, Prescription prescription)
         {
             RxProductLookup rxProductLookup = prescription.RxProductLookups.SingleOrDefault(x => x.ProductId == productId);
-            if (rxProductLookup != null)
+            return new RxRate()
             {
-                var rxRate = new RxRate
-                {
-                    Rate = productRate,
-                    RxProductLookupId = rxProductLookup.Id.ReferenceId,
-                };
-
-                return rxRate;
-            }
-            else
-            {
-                return null;
-            }
+                Rate = productRate,
+                RxProductLookupId = rxProductLookup?.Id?.ReferenceId ?? 0
+            };
         }
 
         #endregion Import

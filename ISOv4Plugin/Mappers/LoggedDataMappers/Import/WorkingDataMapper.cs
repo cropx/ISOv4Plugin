@@ -134,7 +134,7 @@ namespace AgGateway.ADAPT.ISOv4Plugin.Mappers
             if (meterCreator != null)
             {
                 //Enumerated Representations
-                var isoEnumeratedMeters = meterCreator.CreateMeters(isoSpatialRows);
+                var isoEnumeratedMeters = meterCreator.CreateMeters(isoSpatialRows, dlv);
                 foreach (ISOEnumeratedMeter enumeratedMeter in isoEnumeratedMeters)
                 {
                     DataLogValuesByWorkingDataID.Add(enumeratedMeter.Id.ReferenceId, dlv);
@@ -155,29 +155,20 @@ namespace AgGateway.ADAPT.ISOv4Plugin.Mappers
                 proprietaryWorkingData.Representation = new ApplicationDataModel.Representations.NumericRepresentation { Code = dlv.ProcessDataDDI, CodeSource = RepresentationCodeSourceEnum.ISO11783_DDI };
                 proprietaryWorkingData.DeviceElementUseId = deviceElementUse.Id.ReferenceId;
 
-                //Take any information from DPDs/DVPs
-                ApplicationDataModel.Common.UnitOfMeasure uom = null;
+                //Always set unit as count.   In SpatialRecordMapper, we will place the DVP unit on the NumericRepresentationValue.UserProvidedUnitOfMeasure
+                //so that consumers can apply any offset/scaling to get to the desired display unit.
+                proprietaryWorkingData.UnitOfMeasure =  UnitSystemManager.GetUnitOfMeasure("count"); 
+
+                //Take any information from DPD
                 ISODeviceElement det = isoDeviceElementHierarchy.DeviceElement;
                 if (det != null)
                 {
                     ISODeviceProcessData dpd = det.DeviceProcessDatas.FirstOrDefault(d => d.DDI == dlv.ProcessDataDDI);
                     if (dpd != null)
                     {
-                        proprietaryWorkingData.Representation.Description = dpd.Designator; //Update the representation with a name since we have one here.
-                        ISODeviceValuePresentation dvp = det.Device.DeviceValuePresentations.FirstOrDefault(d => d.ObjectID == dpd.DeviceValuePresentationObjectId);
-                        if (dvp != null && dvp.UnitDesignator != null)
-                        {
-                            if (AgGateway.ADAPT.Representation.UnitSystem.InternalUnitSystemManager.Instance.UnitOfMeasures.Contains(dvp.UnitDesignator))
-                            {
-                                //The unit designator used by the OEM will need to match ADAPT for this to work, otherwise we'll need to default to 'count' below
-                                //It will likely work for many simple units and will not for work compound units
-                                uom = UnitSystemManager.GetUnitOfMeasure(dvp.UnitDesignator);
-                            }
-                        }   
+                        proprietaryWorkingData.Representation.Description = dpd.Designator; //Update the representation with a name since we have one here.  
                     }
                 }
-
-                proprietaryWorkingData.UnitOfMeasure = uom ?? UnitSystemManager.GetUnitOfMeasure("count"); //Best we can do
 
                 DataLogValuesByWorkingDataID.Add(proprietaryWorkingData.Id.ReferenceId, dlv);
                 ISODeviceElementIDsByWorkingDataID.Add(proprietaryWorkingData.Id.ReferenceId, dlv.DeviceElementIdRef);
@@ -221,37 +212,69 @@ namespace AgGateway.ADAPT.ISOv4Plugin.Mappers
                 for (int i = 0; i < isoSectionElements.Count(); i++)
                 {
                     WorkingData workingData = condensedWorkingDatas[i];
-
-                    DeviceElementUse condensedDeviceElementUse = new DeviceElementUse();
-                    condensedDeviceElementUse.OperationDataId = deviceElementUse.OperationDataId;
-
                     ISODeviceElement targetSection = targetSections[i];
-                    int? deviceElementID = TaskDataMapper.InstanceIDMap.GetADAPTID(targetSection.DeviceElementId);
-                    if (deviceElementID.HasValue)
+
+                    DeviceElementUse condensedDeviceElementUse = FindExistingDeviceElementUseForCondensedData(targetSection, pendingDeviceElementUses);
+                    if (condensedDeviceElementUse == null)
                     {
-                        DeviceElement deviceElement = DataModel.Catalog.DeviceElements.SingleOrDefault(d => d.Id.ReferenceId == deviceElementID.Value);
-                        if (deviceElement != null)
+                        //Make a new DeviceElementUse
+                        condensedDeviceElementUse = new DeviceElementUse();
+                        condensedDeviceElementUse.OperationDataId = deviceElementUse.OperationDataId;
+
+                        int? deviceElementID = TaskDataMapper.InstanceIDMap.GetADAPTID(targetSection.DeviceElementId);
+                        if (deviceElementID.HasValue)
                         {
-                            //Reference the device element in its hierarchy so that we can get the depth & order
-                            DeviceElementHierarchy deviceElementInHierarchy = isoDeviceElementHierarchy.FromDeviceElementID(targetSection.DeviceElementId);
+                            DeviceElement deviceElement = DataModel.Catalog.DeviceElements.SingleOrDefault(d => d.Id.ReferenceId == deviceElementID.Value);
+                            if (deviceElement != null)
+                            {
+                                //Reference the device element in its hierarchy so that we can get the depth & order
+                                DeviceElementHierarchy deviceElementInHierarchy = isoDeviceElementHierarchy.FromDeviceElementID(targetSection.DeviceElementId);
 
-                            //Get the config id
-                            DeviceElementConfiguration deviceElementConfig = DeviceElementMapper.GetDeviceElementConfiguration(deviceElement, deviceElementInHierarchy, DataModel.Catalog);
-                            condensedDeviceElementUse.DeviceConfigurationId = deviceElementConfig.Id.ReferenceId;
+                                //Get the config id
+                                DeviceElementConfiguration deviceElementConfig = DeviceElementMapper.GetDeviceElementConfiguration(deviceElement, deviceElementInHierarchy, DataModel.Catalog);
+                                condensedDeviceElementUse.DeviceConfigurationId = deviceElementConfig.Id.ReferenceId;
 
-                            //Set the depth & order
-                            condensedDeviceElementUse.Depth = deviceElementInHierarchy.Depth;
-                            condensedDeviceElementUse.Order = deviceElementInHierarchy.Order;
+                                //Set the depth & order
+                                condensedDeviceElementUse.Depth = deviceElementInHierarchy.Depth;
+                                condensedDeviceElementUse.Order = deviceElementInHierarchy.Order;
+                            }
                         }
+
+                        condensedDeviceElementUse.GetWorkingDatas = () => new List<WorkingData> { workingData };
+
+                        workingData.DeviceElementUseId = condensedDeviceElementUse.Id.ReferenceId;
+
+                        pendingDeviceElementUses.Add(condensedDeviceElementUse);
                     }
-
-                    condensedDeviceElementUse.GetWorkingDatas = () => new List<WorkingData> { workingData };
-
-                    workingData.DeviceElementUseId = condensedDeviceElementUse.Id.ReferenceId;
-
-                    pendingDeviceElementUses.Add(condensedDeviceElementUse);
+                    else
+                    {
+                        //Use the existing DeviceElementUse
+                        List<WorkingData> data = new List<WorkingData>();
+                        IEnumerable<WorkingData> existingWorkingDatas = condensedDeviceElementUse.GetWorkingDatas();
+                        if (existingWorkingDatas != null)
+                        {
+                            data.AddRange(existingWorkingDatas.ToList());  //Add the preexisting 
+                        }
+                        data.Add(workingData);
+                        condensedDeviceElementUse.GetWorkingDatas = () => data;
+                    }
                 }
             }
+        }
+
+        private DeviceElementUse FindExistingDeviceElementUseForCondensedData(ISODeviceElement targetSection, List<DeviceElementUse> pendingDeviceElementUses)
+        {
+            DeviceElementUse existingDeviceElementUse = null;
+            int? deviceElementID =  TaskDataMapper.InstanceIDMap.GetADAPTID(targetSection.DeviceElementId);
+            if (deviceElementID.HasValue)
+            {
+                DeviceElementConfiguration config = DataModel.Catalog.DeviceElementConfigurations.FirstOrDefault(d => d.DeviceElementId == deviceElementID.Value);
+                if (config != null)
+                {
+                    existingDeviceElementUse = pendingDeviceElementUses.FirstOrDefault(p => p.DeviceConfigurationId == config.Id.ReferenceId);
+                }
+            }
+            return existingDeviceElementUse;
         }
 
         #endregion Import

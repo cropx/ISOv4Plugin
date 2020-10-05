@@ -4,10 +4,10 @@ using System.Diagnostics;
 using System.Linq;
 using AgGateway.ADAPT.ApplicationDataModel.LoggedData;
 using AgGateway.ADAPT.ApplicationDataModel.Representations;
-using AgGateway.ADAPT.ISOv4Plugin.ExtensionMethods;
 using AgGateway.ADAPT.ISOv4Plugin.ObjectModel;
-using AgGateway.ADAPT.ApplicationDataModel.Equipment;
 using AgGateway.ADAPT.ISOv4Plugin.ISOModels;
+using AgGateway.ADAPT.Representation.UnitSystem;
+using AgGateway.ADAPT.ISOv4Plugin.Representation;
 
 namespace AgGateway.ADAPT.ISOv4Plugin.Mappers
 {
@@ -42,8 +42,8 @@ namespace AgGateway.ADAPT.ISOv4Plugin.Mappers
             //This value will reflect an offset between the processing computer's timezone settings vs. the actual offset of the data itself,
             //and serves to provide a correction if PANs were reported as UTC.
             //This code will require an exact minute/second match between the first record and one of the PANs to take effect
-            ISOSpatialRow firstSpatialRow = isoSpatialRows.First();
-            if (productAllocations.Any())
+            ISOSpatialRow firstSpatialRow = isoSpatialRows.FirstOrDefault();
+            if (firstSpatialRow != null && productAllocations.Any())
             {
                 foreach (ISOProductAllocation pan in productAllocations.First().Value)
                 {
@@ -117,10 +117,19 @@ namespace AgGateway.ADAPT.ISOv4Plugin.Mappers
 
             if (isoValue != null)
             {
-                var value = new NumericRepresentationValue(meter.Representation as NumericRepresentation, meter.UnitOfMeasure, new NumericValue(meter.UnitOfMeasure, isoValue.Value));
+                ADAPT.ApplicationDataModel.Common.UnitOfMeasure userProvidedUnitOfMeasure = meter.UnitOfMeasure; //Default; no display uom provided.
+                var dvp = isoValue.DeviceProcessData?.DeviceValuePresentation;
+                if (dvp != null)
+                {
+                    //If a DVP element is present, report out the desired display unit of measure as the UserProvidedUnitOfMeasure.
+                    //This will not necessarily map to the Representation.UnitSystem.   
+                    userProvidedUnitOfMeasure = new ApplicationDataModel.Common.UnitOfMeasure() { Code = dvp.UnitDesignator, Scale = dvp.Scale, Offset = dvp.Offset };
+                }
+
+                var value = new NumericRepresentationValue(meter.Representation as NumericRepresentation, userProvidedUnitOfMeasure, new NumericValue(meter.UnitOfMeasure, isoValue.Value));
                 spatialRecord.SetMeterValue(meter, value);
 
-                var other = new NumericRepresentationValue(meter.Representation as NumericRepresentation, meter.UnitOfMeasure, new NumericValue(meter.UnitOfMeasure, isoValue.Value));
+                var other = new NumericRepresentationValue(meter.Representation as NumericRepresentation, userProvidedUnitOfMeasure, new NumericValue(meter.UnitOfMeasure, isoValue.Value));
                 _representationValueInterpolator.SetMostRecentMeterValue(meter, other);
             }
             else if (meter.Representation.Code == "vrProductIndex")
