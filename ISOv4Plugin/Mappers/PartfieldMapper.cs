@@ -1,4 +1,4 @@
-﻿/*
+/*
  * ISO standards can be purchased through the ANSI webstore at https://webstore.ansi.org
 */
 
@@ -18,6 +18,7 @@ using AgGateway.ADAPT.ApplicationDataModel.Guidance;
 using AgGateway.ADAPT.ApplicationDataModel.Representations;
 using AgGateway.ADAPT.Representation.RepresentationSystem;
 using AgGateway.ADAPT.Representation.RepresentationSystem.ExtensionMethods;
+using AgGateway.ADAPT.ApplicationDataModel.Common;
 
 namespace AgGateway.ADAPT.ISOv4Plugin.Mappers
 {
@@ -30,7 +31,7 @@ namespace AgGateway.ADAPT.ISOv4Plugin.Mappers
 
         IEnumerable<Field> ImportFields(IEnumerable<ISOPartfield> isoFields);
         Field ImportField(ISOPartfield isoField);
-        IEnumerable<CropZone> ImportCropZones(IEnumerable<ISOPartfield> isoFields);
+        IEnumerable<CropZone> ImportCropZones(IEnumerable<ISOPartfield> isoPartFields, IEnumerable<ISOCropType> isoCrops);
         CropZone ImportCropZone(ISOPartfield isoField);
     }
 
@@ -71,6 +72,7 @@ namespace AgGateway.ADAPT.ISOv4Plugin.Mappers
             string fieldID = adaptField.Id.FindIsoId() ?? GenerateId();
             isoField.PartfieldID = fieldID;
             ExportIDs(adaptField.Id, fieldID);
+            ExportContextItems(adaptField.ContextItems, fieldID, "ADAPT_Context_Items:Field");
 
             //Customer & Farm ID
             ExportFarmAndGrower(adaptField, isoField);
@@ -125,6 +127,7 @@ namespace AgGateway.ADAPT.ISOv4Plugin.Mappers
             string fieldID = cropZone.Id.FindIsoId() ?? GenerateId();
             isoField.PartfieldID = fieldID;
             ExportIDs(cropZone.Id, fieldID);
+            ExportContextItems(cropZone.ContextItems, fieldID, "ADAPT_Context_Items:CropZone");
 
             //Parent Field ID
             isoField.FieldIdRef = TaskDataMapper.InstanceIDMap.GetISOID(cropZone.FieldId);
@@ -209,12 +212,14 @@ namespace AgGateway.ADAPT.ISOv4Plugin.Mappers
             return adaptFields;
         }
 
-        public IEnumerable<CropZone> ImportCropZones(IEnumerable<ISOPartfield> ISOPartfields)
+        public IEnumerable<CropZone> ImportCropZones(IEnumerable<ISOPartfield> isoPartFields, IEnumerable<ISOCropType> isoCrops)
         {
             List<CropZone> adaptCropzones = new List<CropZone>();
-            foreach (ISOPartfield isoPartField in ISOPartfields)
+            foreach (ISOPartfield isoPartField in isoPartFields)
             {
-                if (!string.IsNullOrEmpty(isoPartField.FieldIdRef) || !String.IsNullOrEmpty(isoPartField.CropTypeIdRef))
+                //A reference to a parent field or a crop exists and that reference points to something that exists
+                if ((!string.IsNullOrEmpty(isoPartField.FieldIdRef) && isoPartFields.Any(pf => pf.PartfieldID == isoPartField.FieldIdRef) ||
+                    (!string.IsNullOrEmpty(isoPartField.CropTypeIdRef)) && isoCrops.Any(c => c.CropTypeId == isoPartField.CropTypeIdRef)))
                 {
                     CropZone cropZone = ImportCropZone(isoPartField);
                     adaptCropzones.Add(cropZone);
@@ -229,6 +234,7 @@ namespace AgGateway.ADAPT.ISOv4Plugin.Mappers
 
             //Field ID
             ImportIDs(field.Id, isoPartfield.PartfieldID);
+            field.ContextItems = ImportContextItems(isoPartfield.PartfieldID, "ADAPT_Context_Items:Field");
 
             //Farm ID
             field.FarmId = TaskDataMapper.InstanceIDMap.GetADAPTID(isoPartfield.FarmIdRef);
@@ -241,13 +247,14 @@ namespace AgGateway.ADAPT.ISOv4Plugin.Mappers
             field.Description = isoPartfield.PartfieldDesignator;
 
             //Boundary
+            FieldBoundary fieldBoundary = null;
             PolygonMapper polygonMapper = new PolygonMapper(TaskDataMapper);
-            IEnumerable<Polygon> boundaryPolygons = polygonMapper.ImportPolygons(isoPartfield.Polygons).ToList();
+            IEnumerable<Polygon> boundaryPolygons = polygonMapper.ImportBoundaryPolygons(isoPartfield.Polygons);
             if (boundaryPolygons.Any())
             {
                 MultiPolygon boundary = new MultiPolygon();
                 boundary.Polygons = boundaryPolygons.ToList();
-                FieldBoundary fieldBoundary = new FieldBoundary
+                fieldBoundary = new FieldBoundary
                 {
                     FieldId = field.Id.ReferenceId,
                     SpatialData = boundary,
@@ -271,7 +278,49 @@ namespace AgGateway.ADAPT.ISOv4Plugin.Mappers
                 field.GuidanceGroupIds = groups.Select(g => g.Id.ReferenceId).ToList();
             }
 
-            //TODO any obstacle, flag, entry, etc. data
+            //Obstacles, flags, etc.
+            if (fieldBoundary != null)
+            {
+                foreach (AttributeShape attributePolygon in polygonMapper.ImportAttributePolygons(isoPartfield.Polygons))
+                {
+                    fieldBoundary.InteriorBoundaryAttributes.Add(
+                        new InteriorBoundaryAttribute()
+                        {
+                            Description = attributePolygon.Name,
+                            ContextItems = new List<ContextItem>() { new ContextItem() { Code = "Pr_ISOXML_Attribute_Type", Value = attributePolygon.TypeName } },
+                            Shape = attributePolygon.Shape
+                        });
+                }
+                if (isoPartfield.LineStrings.Any())
+                {
+                    LineStringMapper lsgMapper = new LineStringMapper(TaskDataMapper);
+                    foreach (AttributeShape attributeLsg in lsgMapper.ImportAttributeLineStrings(isoPartfield.LineStrings))
+                    {
+                        fieldBoundary.InteriorBoundaryAttributes.Add(
+                            new InteriorBoundaryAttribute()
+                            {
+                                Description = attributeLsg.Name,
+                                ContextItems = new List<ContextItem>() { new ContextItem() { Code = "Pr_ISOXML_Attribute_Type", Value = attributeLsg.TypeName } },
+                                Shape = attributeLsg.Shape
+                            });
+                    }
+                }
+                if (isoPartfield.Points.Any())
+                {
+                    PointMapper pointMapper = new PointMapper(TaskDataMapper);
+                    foreach (AttributeShape attributePoint in pointMapper.ImportAttributePoints(isoPartfield.Points))
+                    {
+                        fieldBoundary.InteriorBoundaryAttributes.Add(
+                            new InteriorBoundaryAttribute()
+                            {
+                                Description = attributePoint.Name,
+                                ContextItems = new List<ContextItem>() { new ContextItem() { Code = "Pr_ISOXML_Attribute_Type", Value = attributePoint.TypeName } },
+                                Shape = attributePoint.Shape
+                            });
+                    }
+                }
+            }
+
             //TODO store Partfield Code as ContextItem
 
             return field;
@@ -283,15 +332,22 @@ namespace AgGateway.ADAPT.ISOv4Plugin.Mappers
 
             //Cropzone ID
             ImportIDs(cropZone.Id, isoPartfield.PartfieldID);
+            cropZone.ContextItems = ImportContextItems(isoPartfield.PartfieldID, "ADAPT_Context_Items:CropZone");
 
             //Field ID
+            int? fieldID = null;
             if (!string.IsNullOrEmpty(isoPartfield.FieldIdRef))
             {
-                cropZone.FieldId = TaskDataMapper.InstanceIDMap.GetADAPTID(isoPartfield.FieldIdRef).Value;  //Cropzone has a defined parent field in the ISO XML
+                fieldID = TaskDataMapper.InstanceIDMap.GetADAPTID(isoPartfield.FieldIdRef);  //Cropzone has a defined parent field in the ISO XML
+
             }
             else
             {
-                cropZone.FieldId = TaskDataMapper.InstanceIDMap.GetADAPTID(isoPartfield.PartfieldID).Value;  //Field had a crop assigned and we created a single cropzone
+                fieldID = TaskDataMapper.InstanceIDMap.GetADAPTID(isoPartfield.PartfieldID);  //Field had a crop assigned and we created a single cropzone
+            }
+            if (fieldID.HasValue)
+            {
+                cropZone.FieldId = fieldID.Value;
             }
 
             //Area
@@ -303,7 +359,7 @@ namespace AgGateway.ADAPT.ISOv4Plugin.Mappers
 
             //Boundary
             PolygonMapper polygonMapper = new PolygonMapper(TaskDataMapper);
-            IEnumerable<Polygon> boundaryPolygons = polygonMapper.ImportPolygons(isoPartfield.Polygons).ToList();
+            IEnumerable<Polygon> boundaryPolygons = polygonMapper.ImportBoundaryPolygons(isoPartfield.Polygons).ToList();
             if (boundaryPolygons.Any())
             {
                 MultiPolygon boundary = new MultiPolygon();

@@ -33,6 +33,8 @@ namespace AgGateway.ADAPT.ISOv4Plugin.Mappers
         public const string TaskControllerManufacturerProperty = "TaskControllerManufacturer";
         public const string TaskControllerVersionProperty = "TaskControllerVersion";
         public const string DataTransferOriginProperty = "DataTransferOrigin";
+        public const string SpatialRecordDeferredExecution = "SpatialRecordDeferredExecution";
+        public const string MergeSingleBinsIntoBoom = "MergeSingleBinsIntoBoom";
 
         public TaskDataMapper(string dataPath, Properties properties)
         {
@@ -258,16 +260,21 @@ namespace AgGateway.ADAPT.ISOv4Plugin.Mappers
             }
 
             //Tasks
-            if (AdaptDataModel.Documents.WorkItems.Any() || AdaptDataModel.Documents.LoggedData.Any())
+            if (AdaptDataModel.Documents != null &&
+                (AdaptDataModel.Documents.WorkItems.Any() || AdaptDataModel.Documents.LoggedData.Any()))
             {
                 TaskMapper taskMapper = new TaskMapper(this);
                 if (AdaptDataModel.Documents.WorkItems != null)
                 {
                     //Prescriptions
-                    int gridType = 1;
+                    int gridType = 0;
                     if (Properties != null)
                     {
                         Int32.TryParse(Properties.GetProperty(ISOGrid.GridTypeProperty), out gridType);
+                    }
+                    if (gridType == 0)
+                    {
+                        gridType = 1;
                     }
                     if (gridType == 1 || gridType == 2)
                     {
@@ -357,14 +364,16 @@ namespace AgGateway.ADAPT.ISOv4Plugin.Mappers
             {
                 PartfieldMapper partFieldMapper = new PartfieldMapper(this);
                 AdaptDataModel.Catalog.Fields.AddRange(partFieldMapper.ImportFields(partFields));
-                AdaptDataModel.Catalog.CropZones.AddRange(partFieldMapper.ImportCropZones(partFields));
+                AdaptDataModel.Catalog.CropZones.AddRange(partFieldMapper.ImportCropZones(partFields, crops));
             }
 
             //Devices
             IEnumerable<ISODevice> devices = taskData.ChildElements.OfType<ISODevice>();
             if (devices.Any())
             {
-                DeviceElementHierarchies = new DeviceElementHierarchies(devices, RepresentationMapper);
+                bool mergeBins = false;
+                bool.TryParse(Properties.GetProperty(MergeSingleBinsIntoBoom), out mergeBins);
+                DeviceElementHierarchies = new DeviceElementHierarchies(devices, RepresentationMapper, mergeBins);
 
                 DeviceMapper deviceMapper = new DeviceMapper(this);
                 AdaptDataModel.Catalog.DeviceModels.AddRange(deviceMapper.ImportDevices(devices));

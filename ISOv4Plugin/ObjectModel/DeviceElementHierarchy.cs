@@ -19,7 +19,7 @@ namespace AgGateway.ADAPT.ISOv4Plugin.ObjectModel
 {
     public class DeviceElementHierarchies
     {
-        public DeviceElementHierarchies(IEnumerable<ISODevice> devices, RepresentationMapper representationMapper)
+        public DeviceElementHierarchies(IEnumerable<ISODevice> devices, RepresentationMapper representationMapper, bool mergeBins)
         {
             Items = new Dictionary<string, DeviceElementHierarchy>();
             foreach (ISODevice device in devices)
@@ -27,7 +27,7 @@ namespace AgGateway.ADAPT.ISOv4Plugin.ObjectModel
                 ISODeviceElement rootDeviceElement = device.DeviceElements.SingleOrDefault(det => det.DeviceElementType == ISODeviceElementType.Device);
                 if (rootDeviceElement != null)
                 {
-                    DeviceElementHierarchy hierarchy = new DeviceElementHierarchy(rootDeviceElement, 0, representationMapper);
+                    DeviceElementHierarchy hierarchy = new DeviceElementHierarchy(rootDeviceElement, 0, representationMapper, mergeBins);
                     DeviceElementHierarchy.HandleBinDeviceElements(hierarchy);
                     Items.Add(device.DeviceId, hierarchy);
                 }
@@ -66,9 +66,10 @@ namespace AgGateway.ADAPT.ISOv4Plugin.ObjectModel
     /// </summary>
     public class DeviceElementHierarchy
     {
-        public DeviceElementHierarchy(ISODeviceElement deviceElement, int depth, RepresentationMapper representationMapper, HashSet<int> crawledElements = null, DeviceElementHierarchy parent = null)
+        public DeviceElementHierarchy(ISODeviceElement deviceElement, int depth, RepresentationMapper representationMapper, bool mergeSingleBinsIntoBoom, HashSet<int> crawledElements = null, DeviceElementHierarchy parent = null)
         {
             RepresentationMapper = representationMapper;
+            MergedElements = new List<ISODeviceElement>();
             //This Hashset will track that we don't build infinite hierarchies.   
             //The plugin does not support peer control at this time.
             _crawledElements = crawledElements;
@@ -129,10 +130,42 @@ namespace AgGateway.ADAPT.ISOv4Plugin.ObjectModel
                 {
                     int childDepth = depth + 1;
                     Children = new List<DeviceElementHierarchy>();
-                    foreach (ISODeviceElement det in childDeviceElements)
+                    foreach (ISODeviceElement childDeviceElement in childDeviceElements)
                     {
-                        DeviceElementHierarchy child = new DeviceElementHierarchy(det, childDepth, representationMapper, _crawledElements, this);
-                        Children.Add(child);
+                        //If there is a single bin child of the boom (usually alongside sections),
+                        //we can logically combine the bin and boom to have a clean hierarchy
+                        //where sections are the direct children of the element containing the rates.
+                        //We currently use an import property (MergeSingleBinsIntoBoom) to enable this functionality.
+                        //Note that if there are any duplicate DDIs on both the Bin and Boom (non-standard per Annex F.3),
+                        //the FirstOrDefault() logic in the setter methods in the SpatialRecordMapper will prefer the Boom and suppress the Bin data.
+                        if (mergeSingleBinsIntoBoom &&
+                            (DeviceElement.DeviceElementType == ISODeviceElementType.Device || DeviceElement.DeviceElementType == ISODeviceElementType.Function) &&
+                            childDeviceElement.DeviceElementType == ISODeviceElementType.Bin &&
+                            childDeviceElements.Count(c => c.DeviceElementType == ISODeviceElementType.Bin) == 1)
+                        {
+                            //Set the element into the MergedElements list
+                            MergedElements.Add(childDeviceElement);
+
+                            //Set its children as children of the boom
+                            foreach (ISODeviceElement binChild in childDeviceElement.ChildDeviceElements.Where(det => det.ParentObjectId == childDeviceElement.DeviceElementObjectId && det.ParentObjectId != det.DeviceElementObjectId))
+                            {
+                                Children.Add(new DeviceElementHierarchy(binChild, childDepth, representationMapper, mergeSingleBinsIntoBoom, _crawledElements, this));
+                            }
+
+                            //This functionality will not work in the ADAPT framework today for multiple bins on one boom (i.e., ISO 11783-10:2015(E) F.23 & F.33).
+                            //For these, we will fall back to the more basic default functionality in HandleBinDeviceElements()
+                            //where we separate bins and sections into different depths within the ADAPT device hierarchy.
+                            //Plugin implementers will need to rationalize the separate bins to the single boom, 
+                            //with the rate for each bin associated to the corresponding DeviceElement in the ADAPT model.
+                            //Were this multi-bin/single boom DDOP common, we could perhaps extend the WorkingData(?) class with some new piece of information
+                            //To differentiate like data elements from different bins and thereby extend the merge functionality to this case.
+                        }
+                        else
+                        {
+                            //Add the child device element
+                            DeviceElementHierarchy child = new DeviceElementHierarchy(childDeviceElement, childDepth, representationMapper, mergeSingleBinsIntoBoom, _crawledElements, this);
+                            Children.Add(child);
+                        }
                     }
                 }
 
@@ -148,6 +181,12 @@ namespace AgGateway.ADAPT.ISOv4Plugin.ObjectModel
         public int Order { get; set; }
         public ISODeviceElementType Type { get; set; }
         private HashSet<int> _crawledElements;
+
+        /// <summary>
+        /// Tracks any secondary DeviceElements that exist independently in the ISOXML
+        /// but have been merged into another DeviceElement in the ADAPT model
+        /// </summary>
+        public List<ISODeviceElement> MergedElements { get; private set; }
 
         public string WidthDDI { get; set; }
         public int? Width { get; set; }
@@ -270,7 +309,7 @@ namespace AgGateway.ADAPT.ISOv4Plugin.ObjectModel
             }
             return item;
         }
-        public void SetWidthsAndOffsetsFromSpatialData(IEnumerable<ISOSpatialRow> isoRecords, HitchPoint hitchPoint, RepresentationMapper representationMapper)
+        public void SetHitchOffsetsFromSpatialData(ISOTime time, IEnumerable<ISOSpatialRow> isoRecords, HitchPoint hitchPoint, RepresentationMapper representationMapper)
         {
             if (hitchPoint.ReferencePoint == null)
             {
@@ -279,29 +318,29 @@ namespace AgGateway.ADAPT.ISOv4Plugin.ObjectModel
 
             if (XOffset == null)
             {
-                XOffset = GetXOffsetFromSpatialData(isoRecords, DeviceElement.DeviceElementId, representationMapper);
+                XOffset = GetXOffsetFromSpatialData(time, isoRecords, DeviceElement.DeviceElementId, representationMapper);
                 hitchPoint.ReferencePoint.XOffset = XOffsetRepresentation;
             }
 
             if (YOffset == null)
             {
-                YOffset = GetYOffsetFromSpatialData(isoRecords, DeviceElement.DeviceElementId, representationMapper);
+                YOffset = GetYOffsetFromSpatialData(time, isoRecords, DeviceElement.DeviceElementId, representationMapper);
                 hitchPoint.ReferencePoint.YOffset = YOffsetRepresentation;
             }
 
             if (ZOffset == null)
             {
-                ZOffset = GetZOffsetFromSpatialData(isoRecords, DeviceElement.DeviceElementId, representationMapper);
+                ZOffset = GetZOffsetFromSpatialData(time, isoRecords, DeviceElement.DeviceElementId, representationMapper);
                 hitchPoint.ReferencePoint.ZOffset = ZOffsetRepresentation;
             }
         }
 
-        public void SetWidthsAndOffsetsFromSpatialData(IEnumerable<ISOSpatialRow> isoRecords, DeviceElementConfiguration config, RepresentationMapper representationMapper)
+        public void SetWidthsAndOffsetsFromSpatialData(ISOTime time, IEnumerable<ISOSpatialRow> isoRecords, DeviceElementConfiguration config, RepresentationMapper representationMapper)
         {
             //Set values on this object and associated DeviceElementConfiguration 
             if (Width == null)
             {
-                Width = GetWidthFromSpatialData(isoRecords, DeviceElement.DeviceElementId, representationMapper);
+                Width = GetWidthFromSpatialData(time, isoRecords, DeviceElement.DeviceElementId, representationMapper);
             }
 
             if (config.Offsets == null)
@@ -311,7 +350,7 @@ namespace AgGateway.ADAPT.ISOv4Plugin.ObjectModel
 
             if (XOffset == null)
             {
-                XOffset = GetXOffsetFromSpatialData(isoRecords, DeviceElement.DeviceElementId, representationMapper);
+                XOffset = GetXOffsetFromSpatialData(time, isoRecords, DeviceElement.DeviceElementId, representationMapper);
                 if (XOffsetRepresentation != null)
                 {
                     config.Offsets.Add(XOffsetRepresentation);
@@ -320,7 +359,7 @@ namespace AgGateway.ADAPT.ISOv4Plugin.ObjectModel
 
             if (YOffset == null)
             {
-                YOffset = GetYOffsetFromSpatialData(isoRecords, DeviceElement.DeviceElementId, representationMapper);
+                YOffset = GetYOffsetFromSpatialData(time, isoRecords, DeviceElement.DeviceElementId, representationMapper);
                 if (YOffsetRepresentation != null)
                 {
                     config.Offsets.Add(YOffsetRepresentation);
@@ -329,7 +368,7 @@ namespace AgGateway.ADAPT.ISOv4Plugin.ObjectModel
 
             if (ZOffset == null)
             {
-                ZOffset = GetZOffsetFromSpatialData(isoRecords, DeviceElement.DeviceElementId, representationMapper);
+                ZOffset = GetZOffsetFromSpatialData(time, isoRecords, DeviceElement.DeviceElementId, representationMapper);
                 if (ZOffsetRepresentation != null)
                 {
                     config.Offsets.Add(ZOffsetRepresentation);
@@ -382,33 +421,57 @@ namespace AgGateway.ADAPT.ISOv4Plugin.ObjectModel
             }
         }
 
-        private int? GetWidthFromSpatialData(IEnumerable<ISOSpatialRow> isoRecords, string isoDeviceElementID, RepresentationMapper representationMapper)
+        private int? GetWidthFromSpatialData(ISOTime time, IEnumerable<ISOSpatialRow> isoRecords, string isoDeviceElementID, RepresentationMapper representationMapper)
         {
             double maxWidth = 0d;
             string updatedWidthDDI = null;
-            ISOSpatialRow rowWithMaxWidth = isoRecords.FirstOrDefault(r => r.SpatialValues.Any(s => s.DataLogValue.DeviceElementIdRef == isoDeviceElementID &&
-                                                                                                    s.DataLogValue.ProcessDataDDI == "0046"));
-            if (rowWithMaxWidth != null)
+            if (time.DataLogValues.Any(d => d.DeviceElementIdRef == isoDeviceElementID && d.ProcessDataDDI == "0046"))
             {
-                maxWidth = rowWithMaxWidth.SpatialValues.Single(s => s.DataLogValue.DeviceElementIdRef == isoDeviceElementID && s.DataLogValue.ProcessDataDDI == "0046").Value;
-                updatedWidthDDI = "0046";
+                //Find a relevant max width
+                ISODataLogValue dlv = time.DataLogValues.First(d => d.DeviceElementIdRef == isoDeviceElementID && d.ProcessDataDDI == "0046");
+                if (dlv.ProcessDataValue.HasValue)
+                {
+                    //Fixed value
+                    maxWidth = dlv.ProcessDataValue.Value;
+                    updatedWidthDDI = "0046";
+                }
+                else
+                {
+                    //Look for value in first spatial record matching the DDI and DET
+                    ISOSpatialRow rowWithMaxWidth = isoRecords.FirstOrDefault(r => r.SpatialValues.Any(s => s.DataLogValue.DeviceElementIdRef == isoDeviceElementID &&                                                                                    s.DataLogValue.ProcessDataDDI == "0046"));
+                    if (rowWithMaxWidth != null)
+                    {
+                        maxWidth = rowWithMaxWidth.SpatialValues.Single(s => s.DataLogValue.DeviceElementIdRef == isoDeviceElementID && s.DataLogValue.ProcessDataDDI == "0046").Value;
+                        updatedWidthDDI = "0046";
+                    }
+                }
             }
-            else
+            else if (time.DataLogValues.Any(d => d.DeviceElementIdRef == isoDeviceElementID && d.ProcessDataDDI == "0043"))
             {
                 //Find the largest working width
-                IEnumerable<ISOSpatialRow> rows = isoRecords.Where(r => r.SpatialValues.Any(s => s.DataLogValue.DeviceElementIdRef == isoDeviceElementID &&
-                                                                                                 s.DataLogValue.ProcessDataDDI == "0043"));
-                if (rows.Any())
+                ISODataLogValue dlv = time.DataLogValues.First(d => d.DeviceElementIdRef == isoDeviceElementID && d.ProcessDataDDI == "0043");
+                if (dlv.ProcessDataValue.HasValue)
                 {
-                    foreach (ISOSpatialRow row in rows)
-                    {
-                        double value = row.SpatialValues.Single(s => s.DataLogValue.DeviceElementIdRef == isoDeviceElementID && s.DataLogValue.ProcessDataDDI == "0043").Value;
-                        if (value > maxWidth)
-                        {
-                            maxWidth = value;
-                        }
-                    }
+                    //Fixed value
+                    maxWidth = dlv.ProcessDataValue.Value;
                     updatedWidthDDI = "0043";
+                }
+                else
+                {
+                    IEnumerable<ISOSpatialRow> rows = isoRecords.Where(r => r.SpatialValues.Any(s => s.DataLogValue.DeviceElementIdRef == isoDeviceElementID &&
+                                                                                                     s.DataLogValue.ProcessDataDDI == "0043"));                                                               
+                    if (rows.Any())
+                    {
+                        foreach (ISOSpatialRow row in rows)
+                        {
+                            double value = row.SpatialValues.First(s => s.DataLogValue.DeviceElementIdRef == isoDeviceElementID && s.DataLogValue.ProcessDataDDI == "0043").Value;
+                            if (value > maxWidth)
+                            {
+                                maxWidth = value;
+                            }
+                        }
+                        updatedWidthDDI = "0043";
+                    }
                 }
             }
 
@@ -423,58 +486,86 @@ namespace AgGateway.ADAPT.ISOv4Plugin.ObjectModel
             }
         }
 
-        private int? GetYOffsetFromSpatialData(IEnumerable<ISOSpatialRow> isoRecords, string isoDeviceElementID, RepresentationMapper representationMapper)
+        private int? GetYOffsetFromSpatialData(ISOTime time, IEnumerable<ISOSpatialRow> isoRecords, string isoDeviceElementID, RepresentationMapper representationMapper)
         {
-            double offset = 0d;
-            ISOSpatialRow firstYOffset = isoRecords.FirstOrDefault(r => r.SpatialValues.Any(s => s.DataLogValue.DeviceElementIdRef == isoDeviceElementID &&
-                                                                                                    s.DataLogValue.ProcessDataDDI == "0087"));
-            if (firstYOffset != null)
+            if (time.DataLogValues.Any(d => d.DeviceElementIdRef == isoDeviceElementID && d.ProcessDataDDI == "0087"))
             {
-                offset = firstYOffset.SpatialValues.First(s => s.DataLogValue.DeviceElementIdRef == isoDeviceElementID &&
-                                                                                                    s.DataLogValue.ProcessDataDDI == "0087").Value;
-                return (int)offset;
+                ISODataLogValue dlv = time.DataLogValues.First(d => d.DeviceElementIdRef == isoDeviceElementID && d.ProcessDataDDI == "0087");
+                if (dlv.ProcessDataValue.HasValue)
+                {
+                    //Fixed value
+                    return dlv.ProcessDataValue.Value;
+                }
+                else
+                {
+                    //Look for first matching record in binary
+                    ISOSpatialRow firstYOffset = isoRecords.FirstOrDefault(r => r.SpatialValues.Any(s => s.DataLogValue.DeviceElementIdRef == isoDeviceElementID &&
+                                                                                                            s.DataLogValue.ProcessDataDDI == "0087"));
+                    if (firstYOffset != null)
+                    {
+                        double offset = firstYOffset.SpatialValues.First(s => s.DataLogValue.DeviceElementIdRef == isoDeviceElementID &&
+                                                                                                            s.DataLogValue.ProcessDataDDI == "0087").Value;
+                        return (int)offset;
+                    }
+                }
             }
-            else
-            {
-                return null;
-            }
+            return null;
         }
 
-        private int? GetXOffsetFromSpatialData(IEnumerable<ISOSpatialRow> isoRecords, string isoDeviceElementID, RepresentationMapper representationMapper)
+        private int? GetXOffsetFromSpatialData(ISOTime time, IEnumerable<ISOSpatialRow> isoRecords, string isoDeviceElementID, RepresentationMapper representationMapper)
         {
-            double offset = 0d;
-            ISOSpatialRow firstXOffset = isoRecords.FirstOrDefault(r => r.SpatialValues.Any(s => s.DataLogValue.DeviceElementIdRef == isoDeviceElementID &&
-                                                                                                    s.DataLogValue.ProcessDataDDI == "0086"));
-            if (firstXOffset != null)
+            if (time.DataLogValues.Any(d => d.DeviceElementIdRef == isoDeviceElementID && d.ProcessDataDDI == "0086"))
             {
-                offset = firstXOffset.SpatialValues.Single(s => s.DataLogValue.DeviceElementIdRef == isoDeviceElementID &&
-                                                                                                    s.DataLogValue.ProcessDataDDI == "0086").Value;
-                return (int)offset;
+                ISODataLogValue dlv = time.DataLogValues.First(d => d.DeviceElementIdRef == isoDeviceElementID && d.ProcessDataDDI == "0086");
+                if (dlv.ProcessDataValue.HasValue)
+                {
+                    //Fixed value
+                    return dlv.ProcessDataValue.Value;
+                }
+                else
+                {
+                    //Look for first matching record in binary
+                    ISOSpatialRow firstXOffset = isoRecords.FirstOrDefault(r => r.SpatialValues.Any(s => s.DataLogValue.DeviceElementIdRef == isoDeviceElementID &&
+                                                                                                        s.DataLogValue.ProcessDataDDI == "0086"));
+                    if (firstXOffset != null)
+                    {
+                        double offset = firstXOffset.SpatialValues.First(s => s.DataLogValue.DeviceElementIdRef == isoDeviceElementID &&
+                                                                                                            s.DataLogValue.ProcessDataDDI == "0086").Value;
+                        return (int)offset;
+                    }
+                }
             }
-            else
-            {
-                return null;
-            }
+            return null;
         }
 
-        private int? GetZOffsetFromSpatialData(IEnumerable<ISOSpatialRow> isoRecords, string isoDeviceElementID, RepresentationMapper representationMapper)
+        private int? GetZOffsetFromSpatialData(ISOTime time, IEnumerable<ISOSpatialRow> isoRecords, string isoDeviceElementID, RepresentationMapper representationMapper)
         {
-            double offset = 0d;
-            ISOSpatialRow firstZOffset = isoRecords.FirstOrDefault(r => r.SpatialValues.Any(s => s.DataLogValue.DeviceElementIdRef == isoDeviceElementID &&
-                                                                                                    s.DataLogValue.ProcessDataDDI == "0088"));
-            if (firstZOffset != null)
+            if (time.DataLogValues.Any(d => d.DeviceElementIdRef == isoDeviceElementID && d.ProcessDataDDI == "0088"))
             {
-                offset = firstZOffset.SpatialValues.Single(s => s.DataLogValue.DeviceElementIdRef == isoDeviceElementID && s.DataLogValue.ProcessDataDDI == "0088").Value;
-                return (int)offset;
+                ISODataLogValue dlv = time.DataLogValues.First(d => d.DeviceElementIdRef == isoDeviceElementID && d.ProcessDataDDI == "0088");
+                if (dlv.ProcessDataValue.HasValue)
+                {
+                    //Fixed value
+                    return dlv.ProcessDataValue.Value;
+                }
+                else
+                {
+                    //Look for first matching record in binary
+                    ISOSpatialRow firstZOffset = isoRecords.FirstOrDefault(r => r.SpatialValues.Any(s => s.DataLogValue.DeviceElementIdRef == isoDeviceElementID &&
+                                                                                                        s.DataLogValue.ProcessDataDDI == "0088"));
+                    if (firstZOffset != null)
+                    {
+                        double offset = firstZOffset.SpatialValues.First(s => s.DataLogValue.DeviceElementIdRef == isoDeviceElementID &&
+                                                                                                            s.DataLogValue.ProcessDataDDI == "0088").Value;
+                        return (int)offset;
+                    }
+                }
             }
-            else
-            {
-                return null;
-            }
+            return null;
         }
 
         /// <summary>
-        /// Seeder/Drill data will often report rates on bin device elements.   These device elements are the geometrical equivalent of the parent boom for mapping purposes.
+        /// As-applied/planted data will often report rates on bin device elements.   These device elements are the geometrical equivalent of the parent boom for mapping purposes.
         /// They are modeled as sections in ADAPT so that we can detect individual products/rates from these different device elements (tanks).
         /// Since they fall at the same level in the hierarchy as true implement sections, we need to reorder the section depths so that anything below the boom
         /// that is not a bin is moved down one level.   As such, the bin will not effect the geometric modeling of individual sections from left to right.

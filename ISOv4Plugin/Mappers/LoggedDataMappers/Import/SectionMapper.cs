@@ -1,12 +1,9 @@
+using AgGateway.ADAPT.ApplicationDataModel.Equipment;
+using AgGateway.ADAPT.ApplicationDataModel.LoggedData;
+using AgGateway.ADAPT.ISOv4Plugin.ISOModels;
+using AgGateway.ADAPT.ISOv4Plugin.ObjectModel;
 using System.Collections.Generic;
 using System.Linq;
-using AgGateway.ADAPT.ApplicationDataModel.Equipment;
-using AgGateway.ADAPT.ISOv4Plugin.ObjectModel;
-using AgGateway.ADAPT.ISOv4Plugin.ISOModels;
-using AgGateway.ADAPT.ISOv4Plugin.ExtensionMethods;
-using System;
-using AgGateway.ADAPT.ApplicationDataModel.Representations;
-using AgGateway.ADAPT.ApplicationDataModel.LoggedData;
 
 namespace AgGateway.ADAPT.ISOv4Plugin.Mappers
 {
@@ -58,7 +55,7 @@ namespace AgGateway.ADAPT.ISOv4Plugin.Mappers
                         }
 
                         //Read any spatially-listed widths/offsets on this data onto the DeviceElementConfiguration objects
-                        hierarchy.SetWidthsAndOffsetsFromSpatialData(isoRecords, config, RepresentationMapper);
+                        hierarchy.SetWidthsAndOffsetsFromSpatialData(time, isoRecords, config, RepresentationMapper);
 
                         deviceElementUse = sections.FirstOrDefault(d => d.DeviceConfigurationId == config.Id.ReferenceId);
                         if (deviceElementUse == null)
@@ -107,7 +104,7 @@ namespace AgGateway.ADAPT.ISOv4Plugin.Mappers
                                 HitchPoint hitch = DataModel.Catalog.HitchPoints.FirstOrDefault(h => h.Id.ReferenceId == adaptConnector.HitchPointId);
                                 if (hitch != null)
                                 {
-                                    hierarchy.SetWidthsAndOffsetsFromSpatialData(isoRecords, hitch, RepresentationMapper);
+                                    hierarchy.SetHitchOffsetsFromSpatialData(time, isoRecords, hitch, RepresentationMapper);
                                 }
                             }
                         }

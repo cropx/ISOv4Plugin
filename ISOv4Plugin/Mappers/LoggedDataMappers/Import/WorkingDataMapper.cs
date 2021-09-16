@@ -69,7 +69,8 @@ namespace AgGateway.ADAPT.ISOv4Plugin.Mappers
             }
 
             //Add the Working Datas for this DeviceElement
-            IEnumerable<ISODataLogValue> deviceElementDLVs = allDLVs.Where(dlv => dlv.DeviceElementIdRef == isoDeviceElementHierarchy.DeviceElement.DeviceElementId);
+            IEnumerable<ISODataLogValue> deviceElementDLVs = allDLVs.Where(dlv => dlv.DeviceElementIdRef == isoDeviceElementHierarchy.DeviceElement.DeviceElementId ||  //DLV DET reference matches the primary DET for the ADAPT element
+                                                                                  isoDeviceElementHierarchy.MergedElements.Any(e => e.DeviceElementId == dlv.DeviceElementIdRef)); //DLV DET reference matches one of the merged DETs on the ADAPT element
             foreach (ISODataLogValue dlv in deviceElementDLVs)
             {
                 IEnumerable<WorkingData> newWorkingDatas = Map(dlv, 
@@ -113,6 +114,18 @@ namespace AgGateway.ADAPT.ISOv4Plugin.Mappers
             return meter;
         }
 
+        /// <summary>
+        /// This method returns multiple WorkingData objects for a single DLV in the ISO model
+        /// to handle the Condensed DDI case where a single DLV can contain multiple logical
+        /// data points.  For non-condensed DDIs, the method will return a single item in output enumerable.
+        /// </summary>
+        /// <param name="dlv"></param>
+        /// <param name="isoSpatialRows"></param>
+        /// <param name="deviceElementUse"></param>
+        /// <param name="order"></param>
+        /// <param name="pendingDeviceElementUses"></param>
+        /// <param name="isoDeviceElementHierarchy"></param>
+        /// <returns></returns>
         private IEnumerable<WorkingData> Map(ISODataLogValue dlv, 
                                              IEnumerable<ISOSpatialRow> isoSpatialRows, 
                                              DeviceElementUse deviceElementUse, 
@@ -145,7 +158,7 @@ namespace AgGateway.ADAPT.ISOv4Plugin.Mappers
 
                 if (meterCreator is CondensedStateMeterCreator)
                 {
-                    UpdateCondensedWorkingDatas(workingDatas, dlv, deviceElementUse, pendingDeviceElementUses, isoDeviceElementHierarchy);
+                    UpdateCondensedWorkingDatas(workingDatas.Cast<ISOEnumeratedMeter>().ToList(), dlv, deviceElementUse, pendingDeviceElementUses, isoDeviceElementHierarchy);
                 }
             }
             else
@@ -157,10 +170,11 @@ namespace AgGateway.ADAPT.ISOv4Plugin.Mappers
 
                 //Always set unit as count.   In SpatialRecordMapper, we will place the DVP unit on the NumericRepresentationValue.UserProvidedUnitOfMeasure
                 //so that consumers can apply any offset/scaling to get to the desired display unit.
-                proprietaryWorkingData.UnitOfMeasure =  UnitSystemManager.GetUnitOfMeasure("count"); 
+                proprietaryWorkingData.UnitOfMeasure =  UnitSystemManager.GetUnitOfMeasure("count");
 
                 //Take any information from DPD
-                ISODeviceElement det = isoDeviceElementHierarchy.DeviceElement;
+                ISODeviceElement det = isoDeviceElementHierarchy.DeviceElement ??
+                                       isoDeviceElementHierarchy.MergedElements.FirstOrDefault(me => me.DeviceElementId == dlv.DeviceElementIdRef);
                 if (det != null)
                 {
                     ISODeviceProcessData dpd = det.DeviceProcessDatas.FirstOrDefault(d => d.DDI == dlv.ProcessDataDDI);
@@ -199,20 +213,21 @@ namespace AgGateway.ADAPT.ISOv4Plugin.Mappers
             return meter;
         }
 
-        private void UpdateCondensedWorkingDatas(List<WorkingData> condensedWorkingDatas, ISODataLogValue dlv, DeviceElementUse deviceElementUse, List<DeviceElementUse> pendingDeviceElementUses, DeviceElementHierarchy isoDeviceElementHierarchy)
+        private void UpdateCondensedWorkingDatas(List<ISOEnumeratedMeter> condensedWorkingDatas, ISODataLogValue dlv, DeviceElementUse deviceElementUse, List<DeviceElementUse> pendingDeviceElementUses, DeviceElementHierarchy isoDeviceElementHierarchy)
         {
             ISODeviceElement isoDeviceElement = TaskDataMapper.DeviceElementHierarchies.GetISODeviceElementFromID(dlv.DeviceElementIdRef);
-            IEnumerable<ISODeviceElement> isoSectionElements = isoDeviceElement.ChildDeviceElements.Where(d => d.DeviceElementType == ISOEnumerations.ISODeviceElementType.Section);
-            if (isoSectionElements.Count() > 0 && isoSectionElements.Count() <= condensedWorkingDatas.Count)
+            List<ISODeviceElement> isoSectionElements = isoDeviceElement.ChildDeviceElements.Where(d => d.DeviceElementType == ISOEnumerations.ISODeviceElementType.Section).ToList();
+            //We have some sections in the DDOP
+            if (isoSectionElements.Count > 0)
             {
-                //We have found the expected number of sections in the DDOP
-                List<ISODeviceElement> targetSections = isoSectionElements.ToList();
-
                 //Update the DeviceElementReference on the Condensed WorkingDatas
-                for (int i = 0; i < isoSectionElements.Count(); i++)
+                foreach (var workingData in condensedWorkingDatas)
                 {
-                    WorkingData workingData = condensedWorkingDatas[i];
-                    ISODeviceElement targetSection = targetSections[i];
+                    if (workingData.SectionIndex - 1 >= isoSectionElements.Count)
+                    {
+                        break;
+                    }
+                    ISODeviceElement targetSection = isoSectionElements[workingData.SectionIndex - 1];
 
                     DeviceElementUse condensedDeviceElementUse = FindExistingDeviceElementUseForCondensedData(targetSection, pendingDeviceElementUses);
                     if (condensedDeviceElementUse == null)
