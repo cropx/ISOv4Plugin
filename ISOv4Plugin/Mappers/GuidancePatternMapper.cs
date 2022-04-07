@@ -78,7 +78,12 @@ namespace AgGateway.ADAPT.ISOv4Plugin.Mappers
             {
                 case GuidancePatternTypeEnum.AbCurve:
                     AbCurve curve = adaptGuidancePattern as AbCurve;
-                    gpn.LineString = lineStringMapper.ExportLineString(curve.Shape[0], ISOLineStringType.GuidancePattern); //Only first linestring used.
+                    int idx = 0;
+                    if (adaptGuidancePattern.NumbersOfSwathsLeft != null && adaptGuidancePattern.NumbersOfSwathsLeft < curve.Shape.Count)
+                    {
+                        idx = (int)adaptGuidancePattern.NumbersOfSwathsLeft;
+                    }
+                    gpn.LineString = lineStringMapper.ExportLineString(curve.Shape[idx], ISOLineStringType.GuidancePattern);
                     break;
 
                 case GuidancePatternTypeEnum.AbLine:

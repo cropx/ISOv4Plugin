@@ -13,10 +13,6 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="AgGatewayADAPTFramework" Version="2.6.0" />
-  </ItemGroup>
-
-  <ItemGroup>
     <None Update="Resources\ddiExport.txt">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </None>
@@ -25,4 +21,7 @@
     </None>
   </ItemGroup>
 
+  <ItemGroup>
+    <PackageReference Include="AgGatewayADAPTFramework" Version="2.6.0" />
+  </ItemGroup>
 </Project>
